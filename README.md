@@ -1,8 +1,25 @@
 # tagAllResources
 
-A Lambda that walks every enabled region in your AWS account and applies one tag to every taggable resource it finds. It is idempotent, so you can run it as often as you want without re-tagging anything.
+A Lambda that walks every enabled region in your AWS account and applies one tag to every taggable resource it finds. Idempotent, so you can run it on a schedule without re-tagging anything that already carries the tag.
 
-Why this exists: AWS gives you several tagging tools, but none of them sweeps the whole account in one pass. The Resource Groups Tagging API gets close, but it does not return resources that have zero tags, and a handful of services (WAFv2, CloudFront, Route 53, Global Accelerator) need their own client calls. This Lambda glues all of that together.
+## Why this exists
+
+The Resource Groups Tagging API and Tag Editor in the console both inherit the same limitation: [`GetResources` does not return untagged resources](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/API_GetResources.html). Quoting the docs verbatim:
+
+> "GetResources does not return untagged resources. To find untagged resources in your account, use AWS Resource Explorer with a query that uses `tag:none`."
+
+In practice this gap is small. AWS auto-tags most resources for you: CloudFormation stamps `aws:cloudformation:*`, Auto Scaling stamps `aws:autoscaling:*`, EKS stamps cluster ownership, EC2 inherits a `Name` tag from launch templates, and so on. On a typical account, very few things are truly zero-tag.
+
+But a handful of services don't get auto-tagged at all, so a brand-new untagged resource in those services stays invisible to the Tagging API forever:
+
+- WAFv2 (WebACLs, IPSets, RuleGroups, RegexPatternSets, in both `REGIONAL` and `CLOUDFRONT` scope)
+- CloudFront distributions
+- Route 53 hosted zones and health checks
+- Global Accelerator accelerators (control plane only in `us-west-2`)
+
+For those four, the only way to find untagged resources is to call the service's own list API and inspect each one's tags one at a time. That's what this Lambda does, then it stitches the result together with the Tagging API output, walks up to 8 regions in parallel, batches `TagResources` calls at the 20-ARN hard limit, and backs off through five passes when ELB throttles. Production runs across ~17 regions and tens of thousands of resources usually finish in 1-3 minutes.
+
+If you only care about already-tagged resources or you have a small static account, the standard Tag Editor is enough. This Lambda is for the case where you want one tag applied to *everything*, on a recurring schedule, including the resources that AWS-native tooling can't see.
 
 ## What it does
 
